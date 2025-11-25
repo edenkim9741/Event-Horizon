@@ -5,8 +5,10 @@
 #include <random>
 #include <glm/gtc/random.hpp>
 #include <glm/glm.hpp>
+#include <omp.h>
 
-const int numRays = 1000;
+const int numRays = 400;
+static int Day = 0, Time = 0;
 
 // [추가] 선택된 천체의 인덱스 (-1이면 선택 없음)
 int selectedBodyIndex = -1;
@@ -19,13 +21,12 @@ struct Body {
 };
 
 // --- 전역 변수 설정 ---
-std::vector<std::vector<glm::vec3>> rayPaths;
+std::vector<std::vector<glm::vec3>> rayPaths(numRays);
 std::vector<Body> bodies;
 float lightSpeed = 25.0f;
-float dt = 0.005f;
+float dt = 0.01f;
 
 std::vector<glm::vec3> velocities(numRays);
-
 
 
 // 카메라 제어 변수0, 99
@@ -47,13 +48,16 @@ void setupScene() {
 }
 
 void simulateRay() {
-	rayPaths.clear();
+	rayPaths.resize(numRays);
+	std::vector<glm::vec3> temp_velocities(velocities);
 
+#pragma omp parallel for
 	for (int i = 0; i < numRays; i++)
 	{
 		glm::vec3 position = { -10.0f, 10.0f, -5.0f };
 
 		std::vector<glm::vec3> rayPath;
+		rayPath.reserve(10000);
 
 		// 안전을 위해 최대 반복 횟수 설정 (무한 루프 방지)
 		int maxSteps = 100000;
@@ -91,12 +95,8 @@ void simulateRay() {
 			if (minBodyDistSq > 10000.0f) currentDt *= 10.0f; // 아주 멀면 더 빠르게
 
 			// 오일러 적분
-			velocities[i] = velocities[i] + totalAcceleration * currentDt;
-			position = position + velocities[i] * currentDt;
-
-
-
-
+			temp_velocities[i] = temp_velocities[i] + totalAcceleration * currentDt;
+			position = position + temp_velocities[i] * currentDt;
 			// --- [핵심 수정] 종료 범위 확장 ---
 			// 기존 500.0f -> 4000.0f 로 대폭 확장
 			if (position.x > 4000.0f || position.x < -4000.0f ||
@@ -104,13 +104,12 @@ void simulateRay() {
 				position.z > 4000.0f || position.z < -4000.0f) break;
 
 			rayPath.push_back(position);
-			
+
 			step++;
 		}
 
-
 		//rayPath.insert(rayPath.end(), tempRayPath.rbegin(), tempRayPath.rend());
-		rayPaths.push_back(rayPath);
+		rayPaths[i] = std::move(rayPath);
 	}
 }
 // 조명 초기화
@@ -168,6 +167,7 @@ void drawRay(std::vector<glm::vec3> rayPath) {
 	// 테스트를 위해 0.3 ~ 0.5 정도로 조정해보는 것도 좋습니다.
 	glColor4f(1.0f, 0.9f, 0.2f, 0.2f);
 
+	//#pragma omp parallel for
 	for (const auto& p : rayPath) {
 		glVertex3f(p.x, p.y, p.z);
 	}
@@ -232,30 +232,53 @@ void display() {
 	float camZ = cameraDistance * cos(cameraAngleY) * cos(cameraAngleX);
 	gluLookAt(camX, camY, camZ, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
 
-	// 1. 모든 천체 그리기
-	for (int i = 0; i < bodies.size(); ++i) {
-		glColor3f(bodies[i].color.x, bodies[i].color.y, bodies[i].color.z);
-		glPushMatrix();
-		glTranslatef(bodies[i].position.x, bodies[i].position.y, bodies[i].position.z);
-		glutSolidSphere(bodies[i].radius, 30, 30);
+// 1. 모든 천체 그리기
+for (int i = 0; i < bodies.size(); ++i) {
+	glColor3f(bodies[i].color.x, bodies[i].color.y, bodies[i].color.z);
+	glPushMatrix();
+	glTranslatef(bodies[i].position.x, bodies[i].position.y, bodies[i].position.z);
+	glutSolidSphere(bodies[i].radius, 30, 30);
 
-		glDisable(GL_LIGHTING);
-		glColor4f(bodies[i].color.x, bodies[i].color.y, bodies[i].color.z, 0.3f);
-		glutWireSphere(bodies[i].radius * 1.1f, 15, 15);
+	glDisable(GL_LIGHTING);
+	glColor4f(bodies[i].color.x, bodies[i].color.y, bodies[i].color.z, 0.3f);
+	glutWireSphere(bodies[i].radius * 1.1f, 15, 15);
 
-		// [추가] 선택된 천체라면 주위에 강조 표시 (녹색 박스)
-		if (i == selectedBodyIndex) {
-			glColor3f(0.0f, 1.0f, 0.0f); // 녹색
-			glLineWidth(2.0f);
-			glutWireSphere(bodies[i].radius * 1.3f, 10, 10); // 천체보다 조금 큰 박스
-			glLineWidth(1.0f);
-		}
-
-		glEnable(GL_LIGHTING);
-		glPopMatrix();
+	// [추가] 선택된 천체라면 주위에 강조 표시 (녹색 박스)
+	if (i == selectedBodyIndex) {
+		glColor3f(0.0f, 1.0f, 0.0f); // 녹색
+		glLineWidth(2.0f);
+		glutWireSphere(bodies[i].radius * 1.3f, 10, 10); // 천체보다 조금 큰 박스
+		glLineWidth(1.0f);
 	}
 
+	glEnable(GL_LIGHTING);
+	glPopMatrix();
+}
+
+	//// 1. 모든 천체 그리기 (공전 효과 추가)
+	//glColor3f(bodies[0].color.x, bodies[0].color.y, bodies[0].color.z);
+	//glutSolidSphere(bodies[0].radius, 30, 30); // 중앙 블랙홀은 고정
+	//glTranslatef(bodies[0].position.x, bodies[0].position.y, bodies[0].position.z);
+	//glPushMatrix();
+
+	//glRotatef((GLfloat)Day, 0.0f, 1.0f, 0.0f);
+	//glTranslatef(15, 0.0, 0.0);
+	//glRotatef((GLfloat)Time, 0.0, 1.0, 0.0);
+	//glColor3f(bodies[1].color.x, bodies[1].color.y, bodies[1].color.z);
+	//glutSolidSphere(bodies[1].radius, 30, 30);
+	//// 달
+	//glPushMatrix();
+	//glRotatef((GLfloat)Time, 0.0, 1.0, 0.0);
+	//glTranslatef(10, 0.0, 0.0);
+	//glColor3f(bodies[2].color.x, bodies[2].color.y, bodies[2].color.z);
+	//glutSolidSphere(bodies[2].radius, 30, 30);
+	//glPopMatrix();
+	//glPopMatrix();
+	//glEnable(GL_LIGHTING);
+
+	simulateRay();
 	// 2. 광선 궤적 그리기
+//#pragma omp parallel for
 	for (int i = 0; i < numRays; i++) {
 		drawRay(rayPaths[i]);
 	}
@@ -331,10 +354,20 @@ void specialKeyFunc(int key, int x, int y) {
 }
 
 void makeVelocities() {
+	//#pragma omp parallel for
 	for (int i = 0; i < numRays; i++)
 	{
-		velocities[i] = glm::sphericalRand(1.0f)*lightSpeed;
+		velocities[i] = glm::sphericalRand(1.0f) * lightSpeed;
 	}
+}
+
+void MyTimer(int Value)
+{
+	Day = (Day + 2) % 360;
+	Time = (Time + 1) % 360;
+
+	glutPostRedisplay();
+	glutTimerFunc(40, MyTimer, 1);
 }
 
 void reshape(int w, int h) {
@@ -360,6 +393,7 @@ int main(int argc, char** argv) {
 	glutMouseFunc(mouseFunc);
 	glutMotionFunc(motionFunc);
 	glutSpecialFunc(specialKeyFunc);
+	glutTimerFunc(40, MyTimer, 1);
 
 	glutMainLoop();
 	return 0;
