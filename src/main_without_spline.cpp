@@ -9,7 +9,7 @@
 #include <omp.h>
 
 // --- 설정 변수 ---
-const int numRays = 600; // 성능을 위해 1000 -> 300으로 조정 (테스트 후 늘리세요)
+const int numRays = 300; // 성능을 위해 1000 -> 300으로 조정 (테스트 후 늘리세요)
 static float Time = 0.0f; // 정밀한 회전을 위해 float 변경
 
 struct Body {

@@ -7,6 +7,7 @@
 #include <glm/gtc/random.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <omp.h>
+#include <glm/gtc/matrix_transform.hpp>
 
 // --- 설정 변수 ---
 const int numRays = 300;
@@ -67,6 +68,20 @@ glm::vec3 catmullRom(const glm::vec3& p0, const glm::vec3& p1, const glm::vec3& 
 
     return result;
 }
+
+// 점이 화면(Frustum) 안에 있는지 검사하는 함수
+bool isPointVisible(const glm::vec3& point, const glm::mat4& mvpMatrix) {
+    glm::vec4 p = mvpMatrix * glm::vec4(point, 1.0f);
+
+    // OpenGL의 클립 공간 좌표 범위: -w <= x, y, z <= w
+    // 약간의 여유(margin)를 주어 경계선에서 갑자기 사라지는 것을 방지 (1.0 -> 1.2 등)
+    float w = p.w * 1.1f;
+
+    return (p.x >= -w && p.x <= w) &&
+        (p.y >= -w && p.y <= w) &&
+        (p.z >= -w && p.z <= w);
+}
+
 
 // --- 함수 정의 ---
 
@@ -141,7 +156,7 @@ void simulateRay(glm::vec3 startPos) {
 
         // [변경 2] 최대 스텝 수를 대폭 줄임.
         // 기존 2000 -> 200. dt가 커졌으므로 더 적은 스텝으로 먼 거리를 감.
-        int maxSteps = 200; 
+        int maxSteps = 2000; 
         
         for (int step = 0; step < maxSteps; step++) {
             glm::vec3 totalAccel = { 0, 0, 0 };
@@ -207,9 +222,19 @@ void init() {
 }
 
 void drawScene() {
-    // 1. 천체 그리기
+    // 1. MVP 행렬 미리 계산 (루프 밖에서 한 번만 수행하여 성능 확보)
+    // savedProjection과 savedModelview는 display()에서 저장해둔 것 사용
+    glm::mat4 projMat = glm::make_mat4(savedProjection);
+    glm::mat4 viewMat = glm::make_mat4(savedModelview);
+    glm::mat4 mvpMat = projMat * viewMat; // Model-View-Projection
+
+    // --- 천체 그리기 (기존과 동일) ---
     for (int i = 0; i < bodies.size(); ++i) {
         Body* b = bodies[i];
+
+        // [추가 최적화] 천체 자체도 화면 밖이면 안 그림 (선택적)
+        if (!isPointVisible(b->position, mvpMat)) continue;
+
         glPushMatrix();
         glTranslatef(b->position.x, b->position.y, b->position.z);
         glRotatef(Time * b->rotationSpeed * 50.0f, 0, 1, 0);
@@ -226,37 +251,47 @@ void drawScene() {
         glPopMatrix();
     }
 
-    // 2. 광선 그리기 (Spline 적용)
+    // --- 광선 그리기 (컬링 적용) ---
     glDisable(GL_LIGHTING);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-    glLineWidth(1.5f);
 
-    // [변경 3] 스플라인 렌더링 루프
+    // 선 굵기 조절 (이전 질문 반영)
+    glLineWidth(0.8f);
+
     for (const auto& path : rayPaths) {
-        // 점이 너무 적으면 스플라인 계산 불가, 그냥 직선으로 그린다.
-        if (path.size() < 4) {
-            glBegin(GL_LINE_STRIP);
-            glColor4f(1.0f, 0.8f, 0.4f, 0.5f);
-            for (const auto& p : path) glVertex3fv(glm::value_ptr(p));
-            glEnd();
-            continue;
-        }
+        if (path.size() < 4) continue;
 
         glBegin(GL_LINE_STRIP);
-        glColor4f(1.0f, 0.8f, 0.4f, 0.5f); // 반투명한 노란색
+        glColor4f(1.0f, 0.8f, 0.4f, 0.3f); // 투명도 조절
 
-        // 경로상의 점들을 순회하며 스플라인으로 연결
         for (size_t i = 0; i < path.size() - 1; ++i) {
-            // Catmull-Rom을 위한 4개의 제어점 설정
-            // 시작과 끝부분에서는 점을 복제하여 처리 (p0는 p1을 복제, p3는 p2를 복제하는 식)
-            glm::vec3 p0 = (i == 0) ? path[0] : path[i - 1];
             glm::vec3 p1 = path[i];
             glm::vec3 p2 = path[i + 1];
+
+            // [핵심] 컬링 체크
+            // 선분의 시작점(p1)과 끝점(p2)이 둘 다 화면 밖에 있다면 스킵!
+            // 하나라도 안에 있다면(혹은 걸쳐 있다면) 그려야 함.
+            bool v1 = isPointVisible(p1, mvpMat);
+            bool v2 = isPointVisible(p2, mvpMat);
+
+            if (!v1 && !v2) {
+                // 둘 다 화면 밖이면 그리지 않고 다음 선분으로 넘어감.
+                // 단, GL_LINE_STRIP 흐름이 끊기면 안 되므로 
+                //glEnd(); glBegin(GL_LINE_STRIP); 처리를 해줘야 완벽하지만
+                // 여기서는 성능을 위해 그냥 투명한 선을 긋거나 건너뛰는 방식을 씁니다.
+
+                // 가장 간단한 방법: 건너뛰기 (glEnd/glBegin으로 끊어주면 더 좋음)
+                glEnd();
+                glBegin(GL_LINE_STRIP);
+                continue;
+            }
+
+            // --- 스플라인 계산 및 그리기 ---
+            glm::vec3 p0 = (i == 0) ? path[0] : path[i - 1];
             glm::vec3 p3 = (i + 1 == path.size() - 1) ? path[i + 1] : path[i + 2];
 
-            // p1과 p2 사이를 보간 (segments 숫자가 클수록 더 부드럽지만 느려짐)
-            int segments = 5; 
+            int segments = 10;
             for (int j = 0; j <= segments; ++j) {
                 float t = (float)j / (float)segments;
                 glm::vec3 interpolatedPos = catmullRom(p0, p1, p2, p3, t);
