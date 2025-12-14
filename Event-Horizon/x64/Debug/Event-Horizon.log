@@ -1,2 +1,3 @@
 ﻿  main_without_spline_textureMapping.cpp
+C:\Users\edenkim\Documents\edenkim9741\Event-Horizon\src\main_without_spline_textureMapping.cpp(193,1): warning C4715: 'loadSkyDomeTexture': not all control paths return a value
   Event-Horizon.vcxproj -> C:\Users\edenkim\Documents\edenkim9741\Event-Horizon\x64\Debug\Event-Horizon.exe

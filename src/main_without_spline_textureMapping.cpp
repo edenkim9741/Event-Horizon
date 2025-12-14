@@ -49,7 +49,7 @@ float lightSpeed = 30.0f;
 float dt = 0.01f; // 시뮬레이션 스텝 간격 조정
 
 std::vector<glm::vec3> initialVelocities(numRays);
-glm::vec4 lightPosition = { -15.0f, 10.0f, -10.0f, 1.0f };
+glm::vec4 lightPosition = { 0.0f, 0.0f, 0.0f, 1.0f };
 
 // 태양 텍스쳐 매핑을 위한 변수 설정
 GLuint sunTexture = 0;
@@ -65,17 +65,12 @@ bool venusTextureLoaded = false;
 bool jupiterTextureLoaded = false;
 GLUquadric* planetQuadric = nullptr;
 
-// 스카이박스(6면) 텍스처
-enum SkyboxFace {
-    SKYBOX_RIGHT = 0,  // +X
-    SKYBOX_LEFT = 1,  // -X
-    SKYBOX_TOP = 2,  // +Y
-    SKYBOX_BOTTOM = 3,  // -Y
-    SKYBOX_FRONT = 4,  // +Z
-    SKYBOX_BACK = 5   // -Z
-};
-GLuint skyboxTextures[6] = { 0, };
-bool skyboxTexturesLoaded = false;
+// 스카이돔 텍스처
+GLuint skyDomeTexture = 0;
+bool skyDomeTextureLoaded = false;
+GLUquadric* skyDomeQuadric = nullptr;
+// 스카이돔 밝기 (1.0f = 원본, 0.0f = 완전 검정)
+float skyDomeBrightness = 0.35f;
 
 // 카메라 및 인터랙션
 float cameraAngleX = 0.0f;
@@ -107,7 +102,7 @@ void setupScene() {
     blackhole->orbitSpeed = 0.3f;
     blackhole->rotationSpeed = 0.05f;
     blackhole->parent = sun;
-	blackhole->orbitRadius = 60.0f;
+	blackhole->orbitRadius = 50.0f;
 
     // 2. 중성자별 (블랙홀 주위를 공전)
     Body* neutronStar = new Body();
@@ -115,7 +110,7 @@ void setupScene() {
     neutronStar->radius = 2.0f;
     neutronStar->color = { 0.4f, 0.4f, 0.9f };
     neutronStar->parent = blackhole;
-    neutronStar->orbitRadius = 25.0f; // 거리
+    neutronStar->orbitRadius = 15.0f; // 거리
     neutronStar->orbitSpeed = 1.0f;   // 공전 속도
     neutronStar->rotationSpeed = 2.0f;
 
@@ -125,7 +120,7 @@ void setupScene() {
     planet1->radius = 1.0f;
     planet1->color = { 0.8f, 0.3f, 0.3f };
     planet1->parent = neutronStar;
-    planet1->orbitRadius = 8.0f;
+    planet1->orbitRadius = 4.0f;
     planet1->orbitSpeed = 3.0f;
     planet1->rotationSpeed = 1.0f;
 
@@ -155,8 +150,8 @@ GLuint loadTextureGeneric(const char* filename) {
     glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
 
     stbi_image_free(data);
     return texId;
@@ -191,25 +186,10 @@ bool loadJupiterTexture(const char* filename) {
     return true;
 }
 
-bool loadSkyboxTextures(const char* rightPath,
-    const char* leftPath,
-    const char* topPath,
-    const char* bottomPath,
-    const char* frontPath,
-    const char* backPath) {
-    const char* paths[6] = {
-        rightPath, leftPath, topPath, bottomPath, frontPath, backPath
-    };
-
-    for (int i = 0; i < 6; ++i) {
-        skyboxTextures[i] = loadTextureGeneric(paths[i]);
-        if (skyboxTextures[i] == 0) {
-            std::cerr << "Failed to load skybox texture: " << paths[i] << std::endl;
-            return false;
-        }
-    }
-    skyboxTexturesLoaded = true;
-    return true;
+bool loadSkyDomeTexture(const char* filename) {
+    skyDomeTexture = loadTextureGeneric(filename);
+    if (skyDomeTexture == 0) return false;
+    skyDomeTextureLoaded = true;
 }
 
 void makeVelocities() {
@@ -310,72 +290,24 @@ void initLighting() {
     glLightfv(GL_LIGHT0, GL_SPECULAR, white);
 }
 
-void drawSkybox() {
-    if (!skyboxTexturesLoaded) return;
+void drawSkyDome() {
+    if (!skyDomeTextureLoaded || skyDomeQuadric == nullptr) return;
 
-    float size = 300.0f; // 스카이박스 크기 (카메라 거리보다 충분히 크게)
-
-    glDepthMask(GL_FALSE);      // 깊이 버퍼에 쓰지 않음
+    glDepthMask(GL_FALSE);      // 깊이 버퍼에는 쓰지 않음 (배경용)
     glDisable(GL_LIGHTING);
     glEnable(GL_TEXTURE_2D);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 
-    // +X (right)
-    glBindTexture(GL_TEXTURE_2D, skyboxTextures[SKYBOX_RIGHT]);
-    glBegin(GL_QUADS);
-    glTexCoord2f(0.0f, 0.0f); glVertex3f(size, -size, -size);
-    glTexCoord2f(1.0f, 0.0f); glVertex3f(size, -size, size);
-    glTexCoord2f(1.0f, 1.0f); glVertex3f(size, size, size);
-    glTexCoord2f(0.0f, 1.0f); glVertex3f(size, size, -size);
-    glEnd();
+    glPushMatrix();
+    glBindTexture(GL_TEXTURE_2D, skyDomeTexture);
+    // skyDomeBrightness 값으로 전체 배경 밝기 조절
+    glColor3f(skyDomeBrightness, skyDomeBrightness, skyDomeBrightness);
 
-    // -X (left)
-    glBindTexture(GL_TEXTURE_2D, skyboxTextures[SKYBOX_LEFT]);
-    glBegin(GL_QUADS);
-    glTexCoord2f(0.0f, 0.0f); glVertex3f(-size, -size, size);
-    glTexCoord2f(1.0f, 0.0f); glVertex3f(-size, -size, -size);
-    glTexCoord2f(1.0f, 1.0f); glVertex3f(-size, size, -size);
-    glTexCoord2f(0.0f, 1.0f); glVertex3f(-size, size, size);
-    glEnd();
+    // 카메라가 내부에 있도록 충분히 큰 반지름
+    gluSphere(skyDomeQuadric, 400.0, 64, 64);
 
-    // +Y (top)
-    glBindTexture(GL_TEXTURE_2D, skyboxTextures[SKYBOX_TOP]);
-    glBegin(GL_QUADS);
-    glTexCoord2f(0.0f, 0.0f); glVertex3f(-size, size, -size);
-    glTexCoord2f(1.0f, 0.0f); glVertex3f(size, size, -size);
-    glTexCoord2f(1.0f, 1.0f); glVertex3f(size, size, size);
-    glTexCoord2f(0.0f, 1.0f); glVertex3f(-size, size, size);
-    glEnd();
-
-    // -Y (bottom)
-    glBindTexture(GL_TEXTURE_2D, skyboxTextures[SKYBOX_BOTTOM]);
-    glBegin(GL_QUADS);
-    glTexCoord2f(0.0f, 0.0f); glVertex3f(-size, -size, size);
-    glTexCoord2f(1.0f, 0.0f); glVertex3f(size, -size, size);
-    glTexCoord2f(1.0f, 1.0f); glVertex3f(size, -size, -size);
-    glTexCoord2f(0.0f, 1.0f); glVertex3f(-size, -size, -size);
-    glEnd();
-
-    // +Z (front)
-    glBindTexture(GL_TEXTURE_2D, skyboxTextures[SKYBOX_FRONT]);
-    glBegin(GL_QUADS);
-    glTexCoord2f(0.0f, 0.0f); glVertex3f(-size, -size, size);
-    glTexCoord2f(1.0f, 0.0f); glVertex3f(size, -size, size);
-    glTexCoord2f(1.0f, 1.0f); glVertex3f(size, size, size);
-    glTexCoord2f(0.0f, 1.0f); glVertex3f(-size, size, size);
-    glEnd();
-
-    // -Z (back)
-    glBindTexture(GL_TEXTURE_2D, skyboxTextures[SKYBOX_BACK]);
-    glBegin(GL_QUADS);
-    glTexCoord2f(0.0f, 0.0f); glVertex3f(size, -size, -size);
-    glTexCoord2f(1.0f, 0.0f); glVertex3f(-size, -size, -size);
-    glTexCoord2f(1.0f, 1.0f); glVertex3f(-size, size, -size);
-    glTexCoord2f(0.0f, 1.0f); glVertex3f(size, size, -size);
-    glEnd();
-
-    glDisable(GL_TEXTURE_2D);
-    glEnable(GL_LIGHTING);
-    glDepthMask(GL_TRUE);
+    glPopMatrix();
+	glDepthMask(GL_TRUE);
 }
 
 void init() {
@@ -395,6 +327,12 @@ void init() {
         planetQuadric = gluNewQuadric();
         gluQuadricTexture(planetQuadric, GL_TRUE);
         gluQuadricNormals(planetQuadric, GLU_SMOOTH);
+    }
+
+    if (!skyDomeQuadric) {
+        skyDomeQuadric = gluNewQuadric();
+        gluQuadricTexture(skyDomeQuadric, GL_TRUE);
+        gluQuadricNormals(skyDomeQuadric, GLU_SMOOTH);
     }
 
     // 텍스쳐 파일 로드
@@ -419,17 +357,11 @@ void init() {
             std::cerr << "Failed to load 8k_jupiter texture" << std::endl;
         }
     }
-    if (!skyboxTexturesLoaded) {
+    if (!skyDomeTextureLoaded) {
         // 실제 파일 경로/이름에 맞게 수정해서 사용
-        if (!loadSkyboxTextures(
-            ".\\texture\\px.png", // 오른쪽
-            ".\\texture\\nx.png", // 왼쪽
-            ".\\texture\\py.png", // 위
-            ".\\texture\\ny.png", // 아래
-            ".\\texture\\pz.png", // 앞
-            ".\\texture\\nz.png")) // 뒤
+        if (!loadSkyDomeTexture(".\\texture\\NightSkyHDRI009_8K_TONEMAPPED.jpg"))
         {
-            std::cerr << "Failed to load skybox textures" << std::endl;
+            std::cerr << "Failed to load sky dome textures" << std::endl;
         }
     }
     glDisable(GL_TEXTURE_2D);
@@ -446,7 +378,7 @@ void drawScene() {
         glRotatef(-90.0f, 1.0f, 0.0f, 0.0f);
 
         // 자전 시각화
-        glRotatef(Time * b->rotationSpeed * 50.0f, 0, 1, 0);
+        glRotatef(Time * b->rotationSpeed * 50.0f, 0, 0, 1);
 
         // 선택된 천체 표시
         if (i == selectedBodyIndex) {
@@ -545,13 +477,13 @@ void display() {
     float camZ = cameraDistance * cos(cameraAngleY) * cos(cameraAngleX);
     gluLookAt(camX, camY, camZ, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
 
-    // 스카이박스: 카메라 위치 제거(회전만 유지)
+    // 스카이돔: 카메라 위치 제거(회전만 유지)
     glPushMatrix();
     GLfloat mv[16];
     glGetFloatv(GL_MODELVIEW_MATRIX, mv);
     mv[12] = mv[13] = mv[14] = 0.0f; // translation 제거
     glLoadMatrixf(mv);
-    drawSkybox();
+    drawSkyDome();
     glPopMatrix();
 
     // 3. Picking을 위해 현재 행렬 상태 저장
