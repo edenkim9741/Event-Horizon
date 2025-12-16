@@ -97,6 +97,13 @@ int lastMouseX, lastMouseY;
 bool isDragging = false;
 int selectedBodyIndex = -1;
 
+// 현재 카메라가 바라보는 실제 좌표
+glm::vec3 currentLookAt(0.0f, 0.0f, 0.0f);
+// 카메라가 따라갈 천체 인덱스 (-1일 때 원점/태양)
+int cameraTargetIndex = -1;
+// 이동 부드러움 정도
+float cameraSmoothSpeed = 0.1f;            
+
 // Picking을 위한 행렬 저장소
 GLdouble savedModelview[16];
 GLdouble savedProjection[16];
@@ -145,6 +152,63 @@ void setupScene() {
     bodies.push_back(neutronStar);
     bodies.push_back(planet1);
 }
+
+// 텍스트 출력을 위한 헬퍼 함수
+void renderBitmapString(float x, float y, void* font, const char* string) {
+    const char* c;
+    glRasterPos2f(x, y);
+    for (c = string; *c != '\0'; c++) {
+        glutBitmapCharacter(font, *c);
+    }
+}
+
+// 화면 좌측 하단에 설명 출력 (HUD)
+void drawInstructions() {
+    // 현재 뷰포트 크기 가져오기
+    GLint viewport[4];
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    int width = viewport[2];
+    int height = viewport[3];
+
+    // 2D 렌더링을 위해 프로젝션 변경
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    gluOrtho2D(0, width, 0, height); // 좌하단(0,0), 우상단(w,h)
+
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+
+    // 텍스트 렌더링을 위해 조명/깊이 테스트 끄기
+    glDisable(GL_LIGHTING);
+    glDisable(GL_DEPTH_TEST);
+
+    // 텍스트 색상 (흰색)
+    glColor3f(1.0f, 1.0f, 1.0f);
+
+    // 줄 간격 설정
+    int lineHeight = 20;
+    int startY = 20; // 바닥에서 띄울 간격
+    int startX = 20; // 왼쪽에서 띄울 간격
+
+    // 설명 문구 출력 (아래에서 위로 쌓음)
+    renderBitmapString(startX, startY + lineHeight * 4, GLUT_BITMAP_HELVETICA_18, "[ Controls ]");
+    renderBitmapString(startX, startY + lineHeight * 3, GLUT_BITMAP_HELVETICA_12, "Mouse Left Click: Focus Object");
+    renderBitmapString(startX, startY + lineHeight * 2, GLUT_BITMAP_HELVETICA_12, "Mouse Drag / Scroll: Rotate / Zoom");
+    renderBitmapString(startX, startY + lineHeight * 1, GLUT_BITMAP_HELVETICA_12, "Arrow Up/Down: Change Mass");
+    renderBitmapString(startX, startY + lineHeight * 0, GLUT_BITMAP_HELVETICA_12, "ESC: Reset View to Sun");
+
+    // 상태 복구
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_LIGHTING);
+
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+}
+
 
 // 공통 텍스처 로더
 GLuint loadTextureGeneric(const char* filename) {
@@ -511,17 +575,6 @@ void drawScene() {
         // 자전 시각화
         glRotatef(Time * b->rotationSpeed * 50.0f, 0, 0, 1);
 
-        // 선택된 천체 표시
-        if (i == selectedBodyIndex) {
-            glDisable(GL_LIGHTING);
-            glColor3f(0.0f, 1.0f, 0.0f);
-            glutWireSphere(b->radius * 1.2f, 16, 16);
-            glEnable(GL_LIGHTING);
-        }
-
-        // Set material for this body (diffuse from color or white for textured)
-        // (Specular/shininess are applied via glMaterial)
-
         // 인덱스 기준으로 각 구체에 텍스처 매핑
         GLuint texId = 0;
         bool useTexture = false;
@@ -597,6 +650,23 @@ void drawScene() {
     drawSunCorona(sunRadius);
 
     glPopMatrix();
+
+    if (selectedBodyIndex != -1) {
+        Body* b = bodies[selectedBodyIndex];
+        glPushMatrix();
+        glTranslatef(b->position.x, b->position.y, b->position.z);
+
+        glRotatef(-90.0f, 1.0f, 0.0f, 0.0f);
+        glRotatef(Time * b->rotationSpeed * 50.0f, 0, 0, 1);
+
+        glDisable(GL_LIGHTING);
+
+        glColor3f(0.0f, 1.0f, 0.0f); // 선명한 초록색
+        glutWireSphere(b->radius * 1.2f, 16, 16);
+
+        glEnable(GL_LIGHTING);
+        glPopMatrix();
+    }
 }
 
 void display() {
@@ -609,11 +679,24 @@ void display() {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glLoadIdentity();
 
-    float camX = cameraDistance * sin(cameraAngleY) * cos(cameraAngleX);
-    float camY = cameraDistance * sin(cameraAngleX);
-    float camZ = cameraDistance * cos(cameraAngleY) * cos(cameraAngleX);
-    gluLookAt(camX, camY, camZ, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+    glm::vec3 targetPos(0.0f, 0.0f, 0.0f); // 기본은 원점
+    if (cameraTargetIndex >= 0 && cameraTargetIndex < bodies.size()) {
+        // 해당 천체의 현재 위치를 목표로 설정
+        targetPos = bodies[cameraTargetIndex]->position;
+    }
 
+    // 공식: Current = Current + (Target - Current) * Speed
+    glm::vec3 dir = targetPos - currentLookAt;
+    currentLookAt += dir * cameraSmoothSpeed;
+
+    // (3) 카메라 위치(Eye) 계산
+    float camX = currentLookAt.x + cameraDistance * sin(cameraAngleY) * cos(cameraAngleX);
+    float camY = currentLookAt.y + cameraDistance * sin(cameraAngleX);
+    float camZ = currentLookAt.z + cameraDistance * cos(cameraAngleY) * cos(cameraAngleX);
+
+    gluLookAt(camX, camY, camZ,
+        currentLookAt.x, currentLookAt.y, currentLookAt.z,
+        0.0, 1.0, 0.0);
     // 뷰 좌표계에서 태양 라이트 위치 갱신
     applySunLightInView();
 
@@ -633,6 +716,8 @@ void display() {
 
     // 4. 그리기
     drawScene();
+
+	drawInstructions();
 
     glutSwapBuffers();
 }
@@ -670,6 +755,7 @@ void pickBody(int mouseX, int mouseY) {
 
     if (selectedBodyIndex != -1) {
         std::cout << "Selected Body: " << selectedBodyIndex << " (Mass: " << bodies[selectedBodyIndex]->mass << ")" << std::endl;
+        cameraTargetIndex = selectedBodyIndex;
     }
 }
 
@@ -707,6 +793,7 @@ void motionFunc(int x, int y) {
     }
 }
 
+
 void specialKeyFunc(int key, int x, int y) {
     if (selectedBodyIndex != -1) {
         if (key == GLUT_KEY_UP) bodies[selectedBodyIndex]->mass += 50.0f;
@@ -715,6 +802,13 @@ void specialKeyFunc(int key, int x, int y) {
             if (bodies[selectedBodyIndex]->mass < 0) bodies[selectedBodyIndex]->mass = 0;
         }
         std::cout << "Body " << selectedBodyIndex << " Mass: " << bodies[selectedBodyIndex]->mass << std::endl;
+    }
+}
+
+void keyboardFunc(unsigned char key, int x, int y) {
+    if (key == 27) { // 27 = ESC Key ASCII Code
+        cameraTargetIndex = -1; // 타겟 해제 (태양/원점 바라보기)
+        std::cout << "View Reset to Origin" << std::endl;
     }
 }
 
@@ -743,6 +837,7 @@ int main(int argc, char** argv) {
     glutReshapeFunc(reshape);
     glutMouseFunc(mouseFunc);
     glutMotionFunc(motionFunc);
+	glutKeyboardFunc(keyboardFunc);
     glutSpecialFunc(specialKeyFunc);
     glutTimerFunc(16, MyTimer, 1);
 
